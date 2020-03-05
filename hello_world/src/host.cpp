@@ -26,47 +26,70 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 **********/
-
 #include "xcl2.hpp"
-#include <algorithm>
 #include <vector>
-#define DATA_SIZE 4096
 
+using std::vector;
+
+static const int DATA_SIZE = 1024;
+static const std::string error_message =
+    "Error: Result mismatch:\n"
+    "i = %d CPU result = %d Device result = %d\n";
+
+// This example illustrates the very simple OpenCL example that performs
+// an addition on two vectors
 int main(int argc, char **argv) {
-    if (argc != 2) {
+	int isize=0;
+	int max_val,num_of_cols,num_of_rows;//maximum intensity value : 255
+    
+    string inputLine ="";
+     if (argc != 2) {
         std::cout << "Usage: " << argv[0] << " <XCLBIN File>" << std::endl;
         return EXIT_FAILURE;
     }
+	
+	//read the image file
+    ifstream image("targets.ppm",ios::binary);
+    //detremine its size
+ 
 
+    getline(image,inputLine);// read the first line : P5
+    if(inputLine.compare("P2")!=0) cerr <<"Version error"<< endl;
+    cout <<"Version : "<< inputLine << endl;
+
+    getline(image,inputLine);// read the second line : comment
+    //cout <<"Comment : "<< inputLine << endl;
+
+   //read the third line : width and height
+     image >> num_of_cols ;
+    image >> num_of_rows;
+    image >> max_val;
+    isize= num_of_cols*num_of_rows ;
+    
+    
+     
     std::string binaryFile = argv[1];
-    size_t vector_size_bytes = sizeof(int) * DATA_SIZE;
+    //threshold_value = atoi(argv[2]);
+    // compute the size of array in bytes
+    size_t size_in_bytes = isize * sizeof(int);
+    
+    
     cl_int err;
-    cl::Context context;
-    cl::Kernel krnl_vector_add;
     cl::CommandQueue q;
-    // Allocate Memory in Host Memory
-    // When creating a buffer with user pointer (CL_MEM_USE_HOST_PTR), under the hood user ptr
-    // is used if it is properly aligned. when not aligned, runtime had no choice but to create
-    // its own host side buffer. So it is recommended to use this allocator if user wish to
-    // create buffer using CL_MEM_USE_HOST_PTR to align user buffer to page boundary. It will
-    // ensure that user buffer is used when user create Buffer/Mem object with CL_MEM_USE_HOST_PTR
-    std::vector<int, aligned_allocator<int>> source_in1(DATA_SIZE);
-    std::vector<int, aligned_allocator<int>> source_in2(DATA_SIZE);
-    std::vector<int, aligned_allocator<int>> source_hw_results(DATA_SIZE);
-    std::vector<int, aligned_allocator<int>> source_sw_results(DATA_SIZE);
+    cl::Kernel krnl_img_thresh;
+    cl::Context context;
 
-    // Create the test data
-    std::generate(source_in1.begin(), source_in1.end(), std::rand);
-    std::generate(source_in2.begin(), source_in2.end(), std::rand);
-    for (int i = 0; i < DATA_SIZE; i++) {
-        source_sw_results[i] = source_in1[i] + source_in2[i];
-        source_hw_results[i] = 0;
-    }
+    // Creates a vector of DATA_SIZE elements with an initial value of 10 and 32
+    unsigned int img_in[isize];
+     unsigned int img_os[isize];
+      unsigned int img_op[isize];
+      for (unsigned int k=0; k<isize; k++){
+		image>> img_in[k];	
+	}
 
-    // OPENCL HOST CODE AREA START
-    // get_xil_devices() is a utility API which will find the xilinx
-    // platforms and will return list of devices connected to Xilinx platform
+    // The get_xil_devices will return vector of Xilinx Devices
     auto devices = xcl::get_xil_devices();
+
     // read_binary_file() is a utility API which will load the binaryFile
     // and will return the pointer to file buffer.
     auto fileBuf = xcl::read_binary_file(binaryFile);
@@ -82,14 +105,17 @@ int main(int argc, char **argv) {
 
         std::cout << "Trying to program device[" << i
                   << "]: " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
-        OCL_CHECK(err,
-                  cl::Program program(context, {device}, bins, NULL, &err));
+        cl::Program program(context, {device}, bins, NULL, &err);
         if (err != CL_SUCCESS) {
             std::cout << "Failed to program device[" << i
                       << "] with xclbin file!\n";
         } else {
             std::cout << "Device[" << i << "]: program successful!\n";
-            OCL_CHECK(err, krnl_vector_add = cl::Kernel(program, "vadd", &err));
+            // This call will extract a kernel out of the program we loaded in the
+            // previous line. A kernel is an OpenCL function that is executed on the
+            // FPGA. This function is defined in the src/vetor_addition.cl file.
+            OCL_CHECK(
+                err, krnl_img_thresh = cl::Kernel(program, "threshold", &err));
             valid_device++;
             break; // we break because we found a valid device
         }
@@ -99,64 +125,68 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    // Allocate Buffer in Global Memory
-    // Buffers are allocated using CL_MEM_USE_HOST_PTR for efficient memory and
-    // Device-to-host communication
+    // These commands will allocate memory on the FPGA. The cl::Buffer objects can
+    // be used to reference the memory locations on the device. The cl::Buffer
+    // object cannot be referenced directly and must be passed to other OpenCL
+    // functions.
     OCL_CHECK(err,
-              cl::Buffer buffer_in1(context,
-                                    CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                    vector_size_bytes,
-                                    source_in1.data(),
-                                    &err));
+              cl::Buffer buffer_a(context,
+                                  CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
+                                  size_in_bytes,
+                                  img_in,
+                                  &err));
+   
     OCL_CHECK(err,
-              cl::Buffer buffer_in2(context,
-                                    CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                    vector_size_bytes,
-                                    source_in2.data(),
-                                    &err));
-    OCL_CHECK(err,
-              cl::Buffer buffer_output(context,
+              cl::Buffer buffer_result(context,
                                        CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY,
-                                       vector_size_bytes,
-                                       source_hw_results.data(),
+                                       size_in_bytes,
+                                       img_op,
                                        &err));
 
-    int size = DATA_SIZE;
-    OCL_CHECK(err, err = krnl_vector_add.setArg(0, buffer_in1));
-    OCL_CHECK(err, err = krnl_vector_add.setArg(1, buffer_in2));
-    OCL_CHECK(err, err = krnl_vector_add.setArg(2, buffer_output));
-    OCL_CHECK(err, err = krnl_vector_add.setArg(3, size));
+    //set the kernel Arguments
+    int narg = 0;
+    OCL_CHECK(err, err = krnl_img_thresh.setArg(narg++, buffer_result));
+    OCL_CHECK(err, err = krnl_img_thresh.setArg(narg++, buffer_a));
+    
+    OCL_CHECK(err, err = krnl_img_thresh.setArg(narg++, isize));
 
-    // Copy input data to device global memory
+    // These commands will load the source_a and source_b vectors from the host
+    // application and into the buffer_a and buffer_b cl::Buffer objects. The data
+    // will be be transferred from system memory over PCIe to the FPGA on-board
+    // DDR memory.
     OCL_CHECK(err,
-              err = q.enqueueMigrateMemObjects({buffer_in1, buffer_in2},
+              err = q.enqueueMigrateMemObjects({buffer_a},
                                                0 /* 0 means from host*/));
 
-    // Launch the Kernel
-    // For HLS kernels global and local size is always (1,1,1). So, it is recommended
-    // to always use enqueueTask() for invoking HLS kernel
-    OCL_CHECK(err, err = q.enqueueTask(krnl_vector_add));
+    //Launch the Kernel
+    //This is equivalent to calling the enqueueNDRangeKernel function with a 
+    //dimensionality of 1 and a global work size (NDRange) of 1.
+    OCL_CHECK(err, err = q.enqueueTask(krnl_img_thresh));
 
-    // Copy Result from Device Global Memory to Host Local Memory
+    // The result of the previous kernel execution will need to be retrieved in
+    // order to view the results. This call will write the data from the
+    // buffer_result cl_mem object to the source_results vector
     OCL_CHECK(err,
-              err = q.enqueueMigrateMemObjects({buffer_output},
+              err = q.enqueueMigrateMemObjects({buffer_result},
                                                CL_MIGRATE_MEM_OBJECT_HOST));
     q.finish();
-    // OPENCL HOST CODE AREA END
 
-    // Compare the results of the Device to the simulation
-    bool match = true;
-    for (int i = 0; i < DATA_SIZE; i++) {
-        if (source_hw_results[i] != source_sw_results[i]) {
-            std::cout << "Error: Result mismatch" << std::endl;
-            std::cout << "i = " << i << " CPU result = " << source_sw_results[i]
-                      << " Device result = " << source_hw_results[i]
-                      << std::endl;
-            match = false;
-            break;
-        }
+    int match = 0;
+    printf("Result = \n");
+    for (int i = 0; i < isize; i++) {
+		int host_result;
+		if(img_in[i]>150)
+          img_op[i]=255;
+         else img_op[i]=0;
+        
     }
-
-    std::cout << "TEST " << (match ? "PASSED" : "FAILED") << std::endl;
-    return (match ? EXIT_SUCCESS : EXIT_FAILURE);
+    for (int i = 0; i < isize; i++) {
+    if (img_os[i] != img_op[i]) {
+            printf(error_message.c_str(), i, host_result, source_results[i]);
+            match = 1;
+            break;
+        } 
+ }
+    std::cout << "TEST " << (match ? "FAILED" : "PASSED") << std::endl;
+    return (match ? EXIT_FAILURE : EXIT_SUCCESS);
 }
